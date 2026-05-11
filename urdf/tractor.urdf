@@ -1,0 +1,97 @@
+<?xml version="1.0"?>
+<robot name="tractor_model">
+
+  <!-- Base Link (Chassis) -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="3.0 1.5 1.0"/>
+      </geometry>
+      <material name="green">
+        <color rgba="0.0 0.8 0.0 1.0"/>
+      </material>
+      <origin rpy="0 0 0" xyz="1.0 0 0.5"/> <!-- Offset to make rear axle the center -->
+    </visual>
+  </link>
+
+  <!-- Rear Right Wheel -->
+  <link name="rear_right_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.3" radius="0.4"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+      <origin rpy="1.5707 0 0" xyz="0 0 0"/>
+    </visual>
+  </link>
+
+  <joint name="base_to_rear_right_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="rear_right_wheel"/>
+    <origin xyz="0 -0.85 0.4"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- Rear Left Wheel -->
+  <link name="rear_left_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.3" radius="0.4"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+      <origin rpy="1.5707 0 0" xyz="0 0 0"/>
+    </visual>
+  </link>
+
+  <joint name="base_to_rear_left_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="rear_left_wheel"/>
+    <origin xyz="0 0.85 0.4"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- Front Right Wheel -->
+  <link name="front_right_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.3" radius="0.4"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+      <origin rpy="1.5707 0 0" xyz="0 0 0"/>
+    </visual>
+  </link>
+
+  <joint name="base_to_front_right_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="front_right_wheel"/>
+    <origin xyz="2.5 -0.85 0.4"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- Front Left Wheel -->
+  <link name="front_left_wheel">
+    <visual>
+      <geometry>
+        <cylinder length="0.3" radius="0.4"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+      <origin rpy="1.5707 0 0" xyz="0 0 0"/>
+    </visual>
+  </link>
+
+  <joint name="base_to_front_left_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="front_left_wheel"/>
+    <origin xyz="2.5 0.85 0.4"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+</robot>

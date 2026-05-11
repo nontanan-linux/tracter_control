@@ -1,0 +1,5 @@
+best_mpc_weights:
+  heading_error: 7.569673728990853
+  lat_error: 8.272995462092252
+  steer_rate: 68.49847165300228
+  velocity_error: 3.4725567271731417

@@ -1,0 +1,20 @@
+# GWO Tuner Configuration
+gwo_node:
+  ros__parameters:
+    calculation_rate_hz: 10.0 # Frequency for fitness/GWO calculation
+    update_rate_hz: 0.1       # Lower update rate constraint
+    settling_time_s: 2.0      # Time to wait after setting weights before evaluation (s)
+    evaluation_duration_s: 5.0 # Time duration to evaluate fitness (s)
+    
+    # GWO Algorithm Parameters
+    population_size: 10       # Number of wolves (Reduced for faster feedback)
+    max_iter: 100             # Max iterations (per tuning cycle if doing local search, but we run continuous)
+    search_range_pct: 1.0     # Search space +/- 100% around initial guess (Aggressive exploration)
+    
+    # Target Parameters to Tune (Must match MPC Node params)
+    targets:
+      - "lat_error"
+      - "heading_error"
+      - "velocity_error"
+      - "steer_rate"
+      #- "lat_jerk" # Optional

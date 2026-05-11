@@ -1,0 +1,58 @@
+# MPC Configuration File
+
+# 1. System Parameters
+system:
+  dt: 0.1                     # [s] Simulation time step
+  traj_resample_dist: 0.1     # [m] Trajectory resampling distance
+  use_steer_prediction: false 
+  use_delayed_initial_state: false
+  control_cmd_topic: "/mpc/control_cmd"
+
+# 2. Vehicle Parameters
+vehicle:
+  wheelbase: 2.5        # [m]
+  track_width: 1.2      # [m]
+  max_steer: 0.6        # [rad]
+  max_accel: 2.0        # [m/s^2]
+  wheel_radius: 0.4     # [m]
+  chassis_length: 3.5   # [m]
+  chassis_width: 1.6    # [m]
+  chassis_height: 1.0   # [m]
+
+# 3. Path Smoothing & Generation
+path_smoothing:
+  reference_path_file: "paths/figure8.csv"
+  ref_traj_topic: "/mpc/reference_traj"
+
+# 4. MPC Optimization
+mpc:
+  enable_gwo_tuning: true     # Allow external tuning (e.g. GWO)
+  prediction_horizon: 20       # N
+  prediction_dt: 0.1            # dt_ref [s]
+  min_prediction_length: 5.0    # [m] (Adaptive horizon target)
+  
+  # Optimization Weights (Cost Function)
+  weights:
+    # State Errors (Q matrix)
+    lat_error: 5.0          # e_y
+    heading_error: 5.0      # e_theta
+    velocity_error: 30.0     # e_v (Increased to encourage movement)
+    
+    # Input Magnitudes (R matrix)
+    steering_input: 10.0     # delta_diff
+    acceleration_input: 0.1  # accel (Reduced to allow more acceleration)
+    
+    # Input Rates (Smoothness)
+    steer_rate: 50.0        # weight_steer_rate
+    steer_acc: 10.0         # weight_steer_acc (Reduced significantly to allow accel change)
+    lat_jerk: 10.0          # weight_lat_jerk (Proxy via steer rate * v)
+
+  # Hard Constraints
+  constraints:
+    acceleration_limit: 2.0  # [m/s^2] (Redundant with max_accel)
+
+# 5. Debug & Visualization
+debug:
+  enable_logging: true
+  logging_interval: 10
+  visualize_prediction: true
