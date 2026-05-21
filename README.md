@@ -90,7 +90,30 @@ The planning simulator allows you to test the NMPC controller within the full Au
 4. **Switch Autoware to Remote Mode**:
    In a new terminal, call the service to activate external control:
    ```bash
-   ros2 service call /control/external_cmd_selector/select_external_command tier4_control_msgs/srv/ExternalCommandSelect "{mode: {data: 1}}"
+   ros2 service call /api/operation_mode/change_to_remote autoware_adapi_v1_msgs/srv/ChangeOperationMode
+   ```
+5. **Engage the Vehicle**:
+   Finally, click the **Engage** button in the RViz Autoware State Panel, or run:
+   ```bash
+   ros2 service call /api/autoware/set/engage tier4_external_api_msgs/srv/Engage "{engage: true}"
+   ```
+6. **Verify Remote Control**:
+   To ensure Autoware is receiving commands from your node instead of its internal controller, check the `vehicle_cmd_gate` mode:
+   ```bash
+   ros2 topic echo /control/vehicle_cmd_gate/operation_mode
+   ```
+   **Operation Mode Values:**
+   * `1 (STOP)`: Vehicle is stopped for safety.
+   * `2 (AUTONOMOUS)`: Vehicle is controlled by Autoware's internal MPC/Pure Pursuit.
+   * `3 (LOCAL)`: Vehicle is controlled by local hardware/joystick.
+   * `4 (REMOTE)`: Vehicle is controlled by external API (Your `nmpc_control_node`!).
+
+   *(If the output shows `mode: 4`, it means Autoware is in Remote Mode and your node is successfully driving the vehicle!)*
+
+7. **Switch Back to Autoware Control (Optional)**:
+   If you want to stop your custom NMPC and let Autoware drive itself again, change the mode back to Autonomous:
+   ```bash
+   ros2 service call /api/operation_mode/change_to_autonomous autoware_adapi_v1_msgs/srv/ChangeOperationMode
    ```
 
 ## 🕹️ Manual Control (Teleop)
@@ -116,6 +139,6 @@ ros2 run tracter_control ackermann_teleop_node
 
 ## 🔌 Autoware Integration
 
-This package outputs commands using the standard `autoware_auto_control_msgs/msg/AckermannControlCommand`. You can inject these commands into the Autoware stack specifically using the **External/Remote Mode**:
+This package has been updated to output commands using the standard `autoware_control_msgs/msg/Control` suitable for modern Autoware Universe. You can inject these commands into the Autoware stack specifically using the **External/Remote Mode**:
 
-Through `tracter_control_node`, the custom NMPC will publish its control commands directly to `~/input/remote/control_cmd` of Autoware's `external_cmd_selector`. To activate the custom MPC during runtime, simply use Autoware's API or RViz interface to change the active driving mode from **Auto** to **Remote**.
+Through `nmpc_control_node`, the custom NMPC will natively subscribe to modern Autoware topics (`/planning/scenario_planning/trajectory` and `/localization/kinematic_state`) and publish its control commands directly to `/external/selected/control_cmd`. To activate the custom MPC during runtime, simply use Autoware's API or RViz interface to change the active driving mode from **Auto** to **Remote**.

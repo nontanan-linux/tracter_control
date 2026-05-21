@@ -19,9 +19,9 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
-  <exec_depend>autoware_auto_planning_msgs</exec_depend>
-  <exec_depend>autoware_auto_control_msgs</exec_depend>
-  <exec_depend>autoware_auto_vehicle_msgs</exec_depend>
+  <exec_depend>autoware_planning_msgs</exec_depend>
+  <exec_depend>autoware_control_msgs</exec_depend>
+  <exec_depend>autoware_vehicle_msgs</exec_depend>
   <exec_depend>tier4_external_api_msgs</exec_depend>
   <exec_depend>tier4_control_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

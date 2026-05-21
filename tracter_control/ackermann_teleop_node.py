@@ -2,10 +2,13 @@
 import rclpy
 from rclpy.node import Node
 from autoware_auto_control_msgs.msg import AckermannControlCommand
+from autoware_auto_vehicle_msgs.msg import VelocityReport
 import sys
 import select
 import termios
 import tty
+import collections
+from datetime import datetime
 
 # Autoware Messages
 try:
@@ -17,15 +20,69 @@ except ImportError:
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
+# Rich Library
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.align import Align
+from rich.text import Text
+from rich.progress_bar import ProgressBar
+from rich.table import Table
+
 settings = termios.tcgetattr(sys.stdin)
+
+class ActuationControl:
+    """
+    Closed-loop PID velocity controller converting Velocity Error into Throttle and Brake outputs.
+    """
+    def __init__(self, kp=0.5, ki=0.05, kd=0.1, max_speed=5.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.max_speed = max_speed
+        
+        self.integral = 0.0
+        self.prev_error = 0.0
+        
+    def compute_command(self, target_velocity, real_velocity, dt=0.1):
+        if target_velocity == 0.0:
+            self.integral = 0.0
+            self.prev_error = 0.0
+            return 0.0, 1.0  # Zero throttle, Full brake
+            
+        # Compare speed magnitudes to operate independently of driving direction
+        sp = abs(target_velocity)
+        act = abs(real_velocity)
+        
+        error = sp - act
+        self.integral += error * dt
+        # Anti-windup clamping
+        self.integral = max(-2.0, min(2.0, self.integral))
+        
+        derivative = (error - self.prev_error) / dt if dt > 0 else 0.0
+        self.prev_error = error
+        
+        output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+        
+        if output > 0.0:
+            # Acceleration needed
+            throttle = min(1.0, output)
+            brake = 0.0
+        else:
+            # Deceleration needed
+            throttle = 0.0
+            brake = min(1.0, -output)
+            
+        return float(throttle), float(brake)
+
 
 class AckermannTeleop(Node):
     def __init__(self):
         super().__init__('ackermann_teleop')
         
-        # Make space for the 16-line dashboard without clearing terminal history
-        sys.stdout.write('\n' * 16)
-        sys.stdout.flush()
+        # System Logs (deque for max 10 lines)
+        self.system_logs = collections.deque(maxlen=10)
+        self.add_log("Initializing Velocity Teleop Node...")
         
         # Use Reliable + Transient Local QoS
         qos_profile = QoSProfile(
@@ -34,7 +91,7 @@ class AckermannTeleop(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-        # Use ControlCommandStamped for Autoware Remote Mode
+        
         if HAS_TIER4:
             self.control_pub = self.create_publisher(ControlCommandStamped, '/api/external/set/command/remote/control', qos_profile)
             self.heartbeat_pub = self.create_publisher(Heartbeat, '/api/external/set/command/remote/heartbeat', 10)
@@ -48,17 +105,196 @@ class AckermannTeleop(Node):
                 self.has_adapi = False
         else:
             self.control_pub = self.create_publisher(AckermannControlCommand, '/control/command/control_cmd', qos_profile)
+            self.add_log("[yellow]Warning: HAS_TIER4 is False, using basic AckermannControlCommand[/]")
         
-        self.throttle = 0.0
-        self.brake = 0.0
+        # Velocity Status Subscriber
+        self.vel_sub = self.create_subscription(
+            VelocityReport, 
+            '/vehicle/status/velocity_status', 
+            self.velocity_callback, 
+            10
+        )
+        
+        # Real Sensor Feedback Variables
+        self.real_velocity = 0.0
+        self.real_heading_rate = 0.0
+
+        # Control Variables
+        self.target_velocity = 0.0
+        self.max_velocity = 5.0
+        self.velocity_step = 0.1
+        
         self.steering = 0.0
-        self.step = 0.1
-        self.steering_step = 0.05
+        self.steering_step = 0.02
         self.max_steering = 0.6
-        self.enabled = False  # Start disabled for safety, require pressing Space to start
+        self.enabled = False
+        
+        # Actuation Controller & Current Output Buffers
+        self.actuation = ActuationControl(max_speed=self.max_velocity)
+        self.throttle_cmd = 0.0
+        self.brake_cmd = 1.0
+        
+        # Sensor Telemetry History (width=26 columns, dot_width=52 sub-pixels)
+        self.vel_act_hist = collections.deque([0.0]*52, maxlen=52)
+        self.heading_rate_hist = collections.deque([0.0]*52, maxlen=52)
+        
+        # Rich Layout & Live Setup
+        self.layout = self.generate_layout()
+        self.live = Live(self.layout, auto_refresh=False, screen=True)
+        self.live.start()
+        
+        self.add_log("[green]Ready! Press Space to Enable & Engage.[/]")
         
         self.timer = self.create_timer(0.1, self.timer_callback)
-        self.draw_dashboard()
+
+    def velocity_callback(self, msg):
+        self.real_velocity = msg.longitudinal_velocity
+        self.real_heading_rate = msg.heading_rate
+
+    def add_log(self, message: str):
+        now = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.system_logs.append(f"[[cyan]{now}[/]] {message}")
+
+    def generate_layout(self) -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body", size=15),
+            Layout(name="bottom")
+        )
+        layout["body"].split_row(
+            Layout(name="body_left", ratio=1),
+            Layout(name="body_right", ratio=1)
+        )
+        layout["bottom"].split_row(
+            Layout(name="shortcuts", ratio=1),
+            Layout(name="logs", ratio=2)
+        )
+        return layout
+
+    def get_ratatui_chart(self, history, min_val, max_val, style="green"):
+        char_width = 26
+        char_height = 4
+        dot_width = char_width * 2
+        dot_height = char_height * 4
+        
+        grid = [[0 for _ in range(dot_width)] for _ in range(dot_height)]
+        span = max_val - min_val
+        if span == 0: span = 1.0
+        
+        # Populate grid with padded left history
+        hist_list = list(history)
+        missing = dot_width - len(hist_list)
+        padded = [min_val]*missing + hist_list
+        
+        for x in range(dot_width):
+            v = padded[x]
+            norm = max(0.0, min(1.0, (v - min_val) / span))
+            y = dot_height - 1 - int(norm * (dot_height - 0.001))
+            grid[y][x] = 1
+            
+        lines = []
+        for r in range(char_height):
+            row_chars = []
+            for c in range(char_width):
+                w = 0
+                if grid[r*4 + 0][c*2 + 0]: w += 1
+                if grid[r*4 + 1][c*2 + 0]: w += 2
+                if grid[r*4 + 2][c*2 + 0]: w += 4
+                if grid[r*4 + 3][c*2 + 0]: w += 64
+                if grid[r*4 + 0][c*2 + 1]: w += 8
+                if grid[r*4 + 1][c*2 + 1]: w += 16
+                if grid[r*4 + 2][c*2 + 1]: w += 32
+                if grid[r*4 + 3][c*2 + 1]: w += 128
+                row_chars.append(chr(0x2800 + w))
+            lines.append(f"[{style}]" + "".join(row_chars) + "[/]")
+            
+        l_max = f"{max_val:5.1f}"
+        l_mid = f"{(max_val+min_val)/2:5.1f}"
+        l_min = f"{min_val:5.1f}"
+        
+        chart_text = (
+            f" [cyan]{l_max}[/] │ {lines[0]}\n"
+            f"       │ {lines[1]}\n"
+            f" [cyan]{l_mid}[/] │ {lines[2]}\n"
+            f" [cyan]{l_min}[/] │ {lines[3]}\n"
+            f"       └" + "─" * char_width + "\n"
+            f"       [grey37]-5.2s{' ' * (char_width - 9)}Now[/]"
+        )
+        return chart_text
+
+    def update_layout(self):
+        # Update Sensor History Deques
+        self.vel_act_hist.append(self.real_velocity)
+        self.heading_rate_hist.append(self.real_heading_rate)
+
+        # Header
+        status_color = "bold green" if self.enabled else "bold red"
+        status_text = "ENABLED" if self.enabled else "DISABLED"
+        gear_str = "REVERSE" if self.target_velocity < 0.0 else "DRIVE"
+        
+        header_text = Text(f"🚗 Autoware Ackermann Teleop Control | STATUS: [{status_text}] | GEAR: [{gear_str}]", justify="center")
+        header_text.stylize(status_color, 49, 49 + len(status_text) + 2)
+        self.layout["header"].update(Panel(header_text, style="white on blue" if self.enabled else "white on grey37"))
+
+        # Body Left: Visual Bars (Command State)
+        vel_norm = (self.target_velocity + self.max_velocity) / (2 * self.max_velocity)
+        vel_idx = max(0, min(20, int(vel_norm * 20)))
+        vel_arr = ['─'] * 21
+        vel_arr[10] = '┼'
+        vel_arr[vel_idx] = '█'
+        vel_str = "".join(vel_arr)
+
+        throttle_bar = ProgressBar(total=1.0, completed=self.throttle_cmd, style="green", width=30)
+        brake_bar = ProgressBar(total=1.0, completed=self.brake_cmd, style="red", width=30)
+        
+        s_norm = (self.steering + self.max_steering) / (2 * self.max_steering)
+        steer_idx = max(0, min(20, int(s_norm * 20)))
+        steer_arr = ['─'] * 21
+        steer_arr[10] = '┼'
+        steer_arr[steer_idx] = '█'
+        steer_str = "".join(steer_arr)
+
+        body_table = Table.grid(padding=(0, 2))
+        body_table.add_column("Label", justify="right", style="bold yellow")
+        body_table.add_column("Bar", justify="center")
+        body_table.add_column("Value", justify="left")
+        
+        body_table.add_row("TARGET VEL", f"[magenta]{vel_str}[/]", f"[magenta]{self.target_velocity:5.2f} m/s[/]")
+        body_table.add_row("THROTTLE", throttle_bar, f"[green]{self.throttle_cmd*100:3.0f}%[/]")
+        body_table.add_row("BRAKE", brake_bar, f"[red]{self.brake_cmd*100:3.0f}%[/]")
+        body_table.add_row("STEERING", f"[cyan]{steer_str}[/]", f"[cyan]{self.steering:5.2f} rad[/]")
+        
+        self.layout["body_left"].update(Panel(Align.center(body_table, vertical="middle"), title="Actuation State"))
+
+        # Body Right: Premium Ratatui-Style Braille Charts
+        v_chart = self.get_ratatui_chart(self.vel_act_hist, -self.max_velocity, self.max_velocity, style="green")
+        h_chart = self.get_ratatui_chart(self.heading_rate_hist, -1.0, 1.0, style="cyan")
+        
+        dash_content = (
+            f"[bold yellow]─ Longitudinal Velocity Feedback[/] ([green]{self.real_velocity:+.2f} m/s[/])\n"
+            f"{v_chart}\n"
+            f"[bold yellow]─ Heading Rate Feedback[/] ([cyan]{self.real_heading_rate:+.2f} rad/s[/])\n"
+            f"{h_chart}"
+        )
+        
+        self.layout["body_right"].update(Panel(dash_content, title="Sensor Feedback Stream (/vehicle/status/velocity_status)"))
+
+        # Bottom Left: Shortcuts
+        shortcut_table = Table(show_header=False, show_edge=False, box=None)
+        shortcut_table.add_column("Key", style="bold cyan")
+        shortcut_table.add_column("Action")
+        shortcut_table.add_row("[W/X]", "Speed Up / Down")
+        shortcut_table.add_row("[A/D]", "Steer Left / Right")
+        shortcut_table.add_row("[S]", "Emergency Stop")
+        shortcut_table.add_row("[Z]", "Center Steering")
+        shortcut_table.add_row("[Space]", "Toggle Enable/Engage")
+        shortcut_table.add_row("[Ctrl+C]", "Quit")
+        self.layout["bottom"]["shortcuts"].update(Panel(shortcut_table, title="Keyboard Shortcuts"))
+
+        # Bottom Right: Logs
+        log_text = Text.from_markup("\n".join(self.system_logs))
+        self.layout["bottom"]["logs"].update(Panel(log_text, title="System Logs"))
 
     def get_key(self):
         tty.setraw(sys.stdin.fileno())
@@ -72,14 +308,13 @@ class AckermannTeleop(Node):
 
     def call_engage(self):
         if not HAS_TIER4: return
-        # Move below dashboard for logs so it doesn't break UI
-        self.get_logger().info("Changing Operation Mode to REMOTE...")
+        self.add_log("Changing Operation Mode to REMOTE...")
         if hasattr(self, 'has_adapi') and self.has_adapi:
             from autoware_adapi_v1_msgs.srv import ChangeOperationMode
             req_remote = ChangeOperationMode.Request()
             self.remote_client.call_async(req_remote)
             
-        self.get_logger().info("Calling Engage Service...")
+        self.add_log("Calling Engage Service...")
         req = Engage.Request()
         req.engage = True
         self.engage_client.call_async(req)
@@ -89,114 +324,70 @@ class AckermannTeleop(Node):
         if key == ' ':
             self.enabled = not self.enabled
             if self.enabled:
+                self.add_log("[bold green]System ENABLED and ENGAGED[/]")
                 self.call_engage()
+            else:
+                self.add_log("[bold red]System DISABLED (Emergency Stop)[/]")
         
         if key == 'w':
-            self.throttle = min(1.0, self.throttle + self.step)
-            self.brake = 0.0
+            self.target_velocity = min(self.max_velocity, self.target_velocity + self.velocity_step)
         elif key == 'x':
-            self.throttle = 0.0
-            self.brake = min(1.0, self.brake + self.step)
+            self.target_velocity = max(-self.max_velocity, self.target_velocity - self.velocity_step)
         elif key == 'a':
             self.steering += self.steering_step
         elif key == 'd':
             self.steering -= self.steering_step
         elif key == 's':
-            self.throttle = 0.0
-            self.brake = 1.0
+            self.target_velocity = 0.0
+            self.add_log("[red]Emergency Stop (Speed = 0)[/]")
         elif key == 'z':
             self.steering = 0.0
         elif key == '\x03':  # Ctrl-C
+            self.live.stop()
             rclpy.shutdown()
             sys.exit()
 
-        # Clamp steering
         self.steering = max(-self.max_steering, min(self.max_steering, self.steering))
 
         now = self.get_clock().now().to_msg()
         
-        if not self.enabled:
-            self.throttle = 0.0
-            self.brake = 1.0
+        if self.enabled:
+            self.throttle_cmd, self.brake_cmd = self.actuation.compute_command(self.target_velocity, self.real_velocity, dt=0.1)
+        else:
+            self.throttle_cmd, self.brake_cmd = 0.0, 1.0
+            self.actuation.integral = 0.0
+            self.actuation.prev_error = 0.0
 
         if HAS_TIER4:
-            # Send Heartbeat
             hb = Heartbeat()
             hb.stamp = now
             self.heartbeat_pub.publish(hb)
             
-            # Send Gear DRIVE
             gs = GearShiftStamped()
             gs.stamp = now
-            gs.gear_shift.data = GearShift.DRIVE
+            # Handle reverse gear logic
+            if self.target_velocity < 0.0:
+                gs.gear_shift.data = GearShift.REVERSE
+            else:
+                gs.gear_shift.data = GearShift.DRIVE
             self.gear_pub.publish(gs)
 
-            # Send Control
             aw_cmd = ControlCommandStamped()
             aw_cmd.stamp = now
             aw_cmd.control.steering_angle = float(self.steering)
-            aw_cmd.control.throttle = float(self.throttle)
-            aw_cmd.control.brake = float(self.brake)
+            aw_cmd.control.throttle = float(self.throttle_cmd)
+            aw_cmd.control.brake = float(self.brake_cmd)
             self.control_pub.publish(aw_cmd)
         else:
-            # Fallback
             cmd = AckermannControlCommand()
             cmd.stamp = now
-            cmd.longitudinal.speed = float(self.throttle * 5.0)
-            cmd.longitudinal.acceleration = float(self.throttle * 2.0)
+            cmd.longitudinal.speed = float(self.target_velocity)
+            cmd.longitudinal.acceleration = float(self.throttle_cmd * 2.0)
             cmd.lateral.steering_tire_angle = float(self.steering)
             self.control_pub.publish(cmd)
             
-        self.draw_dashboard()
-
-    def draw_dashboard(self):
-        # ANSI Colors
-        GREEN = '\033[92m'
-        RED = '\033[91m'
-        CYAN = '\033[96m'
-        YELLOW = '\033[93m'
-        RESET = '\033[0m'
-        BOLD = '\033[1m'
-
-        status_color = GREEN if self.enabled else RED
-        status_text = " ENABLED " if self.enabled else "DISABLED!"
-        
-        # Progress bars (10 blocks)
-        t_bars = int(self.throttle * 10)
-        t_str = '█' * t_bars + '░' * (10 - t_bars)
-        
-        b_bars = int(self.brake * 10)
-        b_str = '█' * b_bars + '░' * (10 - b_bars)
-        
-        # Steering bar (-0.6 to 0.6 mapped to 11 chars)
-        s_norm = (self.steering + self.max_steering) / (2 * self.max_steering)
-        s_idx = max(0, min(10, int(s_norm * 10)))
-        s_arr = ['─'] * 11
-        s_arr[5] = '┼'
-        s_arr[s_idx] = '█'
-        s_str = "".join(s_arr)
-
-        dashboard = (
-            f"\033[16A\033[J" # Move up 16 lines and clear downward
-            f"{CYAN}{BOLD}================================================={RESET}\n"
-            f"{BOLD}      🚗 Autoware Ackermann Teleop Control       {RESET}\n"
-            f"{CYAN}{BOLD}================================================={RESET}\n"
-            f"  STATUS: [{status_color}{BOLD}{status_text}{RESET}]   GEAR: [{GREEN} DRIVE {RESET}]\n"
-            f"{CYAN}-------------------------------------------------{RESET}\n"
-            f"  {YELLOW}THROTTLE{RESET} : [{GREEN}{t_str}{RESET}] {self.throttle*100:3.0f}%\n"
-            f"  {YELLOW}BRAKE   {RESET} : [{RED}{b_str}{RESET}] {self.brake*100:3.0f}%\n"
-            f"  {YELLOW}STEERING{RESET} : [{CYAN}{s_str}{RESET}] {self.steering:5.2f} rad\n"
-            f"{CYAN}-------------------------------------------------{RESET}\n"
-            f"  [W] Throttle Up     [X] Brake\n"
-            f"  [A] Steer Left      [D] Steer Right\n"
-            f"  [S] Emergency Stop  [Z] Center Steering\n"
-            f"  [Space] Toggle Enable / Auto-Engage\n"
-            f"{CYAN}-------------------------------------------------{RESET}\n"
-            f"  Press [Ctrl+C] to quit\n"
-            f"{CYAN}{BOLD}================================================={RESET}\n"
-        )
-        sys.stdout.write(dashboard)
-        sys.stdout.flush()
+        self.update_layout()
+        self.live.refresh()
 
 def main(args=None):
     rclpy.init(args=args)
@@ -206,6 +397,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.live.stop()
         node.destroy_node()
         rclpy.shutdown()
 

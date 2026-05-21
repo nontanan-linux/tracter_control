@@ -5,8 +5,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped, Point, PoseWithCovarianceStamped, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float64MultiArray
-from autoware_auto_planning_msgs.msg import Trajectory, TrajectoryPoint
-from autoware_auto_control_msgs.msg import AckermannControlCommand
+from autoware_planning_msgs.msg import Trajectory, TrajectoryPoint
+from autoware_control_msgs.msg import Control
 from visualization_msgs.msg import Marker, MarkerArray
 from rcl_interfaces.msg import SetParametersResult
 import numpy as np
@@ -145,8 +145,8 @@ class TracterControlNode(Node):
         self.controller = MPCController()
         
         # 1. Output to Autoware's External Remote command
-        output_topic = '/control/external_cmd_selector/input/remote/control_cmd'
-        self.control_pub = self.create_publisher(AckermannControlCommand, output_topic, 10)
+        output_topic = '/external/selected/control_cmd'
+        self.control_pub = self.create_publisher(Control, output_topic, 10)
         
         # Visualization / Debug topics
         self.predicted_path_pub = self.create_publisher(Path, '/predicted_trajectory', 10)
@@ -267,13 +267,14 @@ class TracterControlNode(Node):
         self.time_idx_debug += 1
 
     def publish_control(self, steer, accel, speed):
-        msg = AckermannControlCommand()
+        msg = Control()
         msg.stamp = self.get_clock().now().to_msg()
         msg.lateral.stamp = msg.stamp
         msg.lateral.steering_tire_angle = float(steer)
         msg.longitudinal.stamp = msg.stamp
-        msg.longitudinal.speed = float(speed)
+        msg.longitudinal.velocity = float(speed)
         msg.longitudinal.acceleration = float(accel)
+        msg.longitudinal.is_defined_acceleration = True
         self.control_pub.publish(msg)
 
 def main(args=None):

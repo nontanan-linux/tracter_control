@@ -4,12 +4,13 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Point
 from nav_msgs.msg import Odometry, Path
-from autoware_auto_planning_msgs.msg import Trajectory
-from autoware_auto_control_msgs.msg import AckermannControlCommand
-
+from autoware_planning_msgs.msg import Trajectory
+from autoware_control_msgs.msg import Control
 # Autoware External API Messages
 try:
-    from tier4_external_api_msgs.msg import ControlCommandStamped, Heartbeat, GearShiftStamped, GearShift
+    from tier4_external_api_msgs.msg import Heartbeat
+    from tier4_external_api_msgs.srv import Engage
+    from autoware_vehicle_msgs.msg import GearCommand
 except ImportError:
     print("Warning: tier4_external_api_msgs not found. Autoware integration will be disabled.")
 
@@ -68,6 +69,7 @@ class NMPCController:
         self.opti.subject_to(self.X[:, 0] == self.x_init)
         self.opti.subject_to(self.opti.bounded(-self.config['vehicle']['max_steer'], self.U[0, :], self.config['vehicle']['max_steer']))
         self.opti.subject_to(self.opti.bounded(-self.config['vehicle']['max_accel'], self.U[1, :], self.config['vehicle']['max_accel']))
+        self.opti.minimize(obj)
         opts = {'ipopt.print_level': 0, 'print_time': 0, 'ipopt.max_iter': 100}
         self.opti.solver('ipopt', opts)
 
@@ -122,17 +124,20 @@ class NMPCControlNode(Node):
         self.max_accel = self.config['vehicle']['max_accel']
         
         # Standard Publishers
-        self.control_pub = self.create_publisher(AckermannControlCommand, '/mpc/control_cmd', 10)
+        self.control_pub = self.create_publisher(Control, '/mpc/control_cmd', 10)
         self.pred_path_pub = self.create_publisher(Path, '/mpc/predicted_trajectory', 10)
         
         # Autoware External API Publishers
-        self.autoware_control_pub = self.create_publisher(ControlCommandStamped, '/api/external/set/command/remote/control', 10)
+        self.autoware_control_pub = self.create_publisher(Control, '/external/selected/control_cmd', 10)
         self.heartbeat_pub = self.create_publisher(Heartbeat, '/api/external/set/command/remote/heartbeat', 10)
-        self.gear_pub = self.create_publisher(GearShiftStamped, '/api/external/set/command/remote/shift', 10)
+        self.gear_pub = self.create_publisher(GearCommand, '/external/selected/gear_cmd', 10)
+        
+        self.engage_client = self.create_client(Engage, '/api/autoware/set/engage')
+        self.goal_reached_triggered = False
         
         # Subscribers
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        self.traj_sub = self.create_subscription(Trajectory, '/mpc/reference_traj_data', self.traj_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/localization/kinematic_state', self.odom_callback, 10)
+        self.traj_sub = self.create_subscription(Trajectory, '/planning/scenario_planning/trajectory', self.traj_callback, 10)
         
         self.current_state = None
         self.full_ref_points = None
@@ -149,11 +154,11 @@ class NMPCControlNode(Node):
 
     def on_shutdown(self):
         self.get_logger().info("Shutting down... Sending STOP command.")
-        stop_cmd = ControlCommandStamped()
+        stop_cmd = Control()
         stop_cmd.stamp = self.get_clock().now().to_msg()
-        stop_cmd.control.steering_angle = 0.0
-        stop_cmd.control.throttle = 0.0
-        stop_cmd.control.brake = 1.0 # Full brake
+        stop_cmd.lateral.steering_tire_angle = 0.0
+        stop_cmd.longitudinal.velocity = 0.0
+        stop_cmd.longitudinal.acceleration = -3.0 # Full brake
         self.autoware_control_pub.publish(stop_cmd)
         
         # Send one last heartbeat to ensure the selector sees the stop
@@ -167,9 +172,9 @@ class NMPCControlNode(Node):
         self.heartbeat_pub.publish(hb)
         
         # Also periodically ensure we are in DRIVE gear
-        gs = GearShiftStamped()
+        gs = GearCommand()
         gs.stamp = hb.stamp
-        gs.gear_shift.data = GearShift.DRIVE
+        gs.command = GearCommand.DRIVE
         self.gear_pub.publish(gs)
 
     def odom_callback(self, msg):
@@ -183,6 +188,9 @@ class NMPCControlNode(Node):
 
     def traj_callback(self, msg):
         self.full_ref_points = msg.points
+        # Reset the goal reached trigger when a new long trajectory is received
+        if self.goal_reached_triggered and len(msg.points) > 20:
+            self.goal_reached_triggered = False
 
     def find_nearest_index(self, state, ref_points):
         dists = [(p.pose.position.x - state[0])**2 + (p.pose.position.y - state[1])**2 for p in ref_points]
@@ -209,6 +217,18 @@ class NMPCControlNode(Node):
         e_theta = self.current_state[2] - yaw_n
         while e_theta > math.pi: e_theta -= 2*math.pi
         while e_theta < -math.pi: e_theta += 2*math.pi
+        
+        # Goal reaching check
+        if not self.goal_reached_triggered and len(self.full_ref_points) > 0:
+            goal_p = self.full_ref_points[-1].pose.position
+            dist_to_goal = math.hypot(self.current_state[0] - goal_p.x, self.current_state[1] - goal_p.y)
+            if dist_to_goal < 1.0 and idx >= len(self.full_ref_points) - 15:
+                self.get_logger().info("🎯 GOAL REACHED! Auto-disengaging vehicle...")
+                self.goal_reached_triggered = True
+                if self.engage_client.wait_for_service(timeout_sec=0.5):
+                    req = Engage.Request()
+                    req.engage = False
+                    self.engage_client.call_async(req)
 
         for i in range(N + 1):
             p_idx = min(idx + i, len(self.full_ref_points) - 1)
@@ -235,25 +255,25 @@ class NMPCControlNode(Node):
             )
 
         # 1. Publish to Standard Topic
-        cmd = AckermannControlCommand()
+        cmd = Control()
         cmd.stamp = self.get_clock().now().to_msg()
+        cmd.lateral.stamp = cmd.stamp
         cmd.lateral.steering_tire_angle = float(u_opt[0])
-        cmd.longitudinal.speed = float(ref_horizon[-1, 0])
+        cmd.longitudinal.stamp = cmd.stamp
+        cmd.longitudinal.velocity = float(ref_horizon[-1, 0])
         cmd.longitudinal.acceleration = float(u_opt[1])
+        cmd.longitudinal.is_defined_acceleration = True
         self.control_pub.publish(cmd)
         
         # 2. Publish to Autoware External API
-        aw_cmd = ControlCommandStamped()
+        aw_cmd = Control()
         aw_cmd.stamp = cmd.stamp
-        aw_cmd.control.steering_angle = float(u_opt[0])
-        accel = float(u_opt[1])
-        # Mapping accel to throttle/brake [0, 1]
-        if accel > 0:
-            aw_cmd.control.throttle = min(1.0, accel / self.max_accel)
-            aw_cmd.control.brake = 0.0
-        else:
-            aw_cmd.control.throttle = 0.0
-            aw_cmd.control.brake = min(1.0, -accel / self.max_accel)
+        aw_cmd.lateral.stamp = cmd.stamp
+        aw_cmd.lateral.steering_tire_angle = float(u_opt[0])
+        aw_cmd.longitudinal.stamp = cmd.stamp
+        aw_cmd.longitudinal.velocity = float(ref_horizon[-1, 0])
+        aw_cmd.longitudinal.acceleration = float(u_opt[1])
+        aw_cmd.longitudinal.is_defined_acceleration = True
         self.autoware_control_pub.publish(aw_cmd)
         
         if x_pred is not None:
