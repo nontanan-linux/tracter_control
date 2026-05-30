@@ -75,11 +75,11 @@ All core parameters are located in `config/mpc_config.yaml`:
 ## 🎮 Planning Simulator
 The planning simulator allows you to test the NMPC controller within the full Autoware environment.
 
-1. **Launch Autoware Planning Simulator**:
+1. **Launch Autoware Planning Simulator (Heli Tow Tractor 12t)**:
    ```bash
-   cd ~/autoware
+   source install/setup.bash
    # Note: map_path must be an absolute path
-   ros2 launch autoware_launch planning_simulator.launch.xml map_path:=/home/nontanan/autoware_data/CAV_GT
+   ros2 launch tracter_launch planning_simulator.launch.xml map_path:=/home/nontanan/autoware_data/BG_new
    ```
 2. **Initialize and Set Goal**:
    In RViz, use the **2D Pose Estimate** tool to set the vehicle's starting position and the **2D Nav Goal** tool to set the destination.
